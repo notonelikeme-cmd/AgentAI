@@ -1,0 +1,27 @@
+{
+  "datasets": {
+    "seyyedaliayati/solidity-defi-vulnerabilities": {
+      "status": "error",
+      "error": "Dataset 'seyyedaliayati/solidity-defi-vulnerabilities' is a gated dataset on the Hub. You must be authenticated to access it.",
+      "rows_stored": 0
+    },
+    "msc-smart-contract-auditing/vulnerable-functions-base": {
+      "status": "fetched",
+      "rows_stored": 1972,
+      "total_available": 1972
+    },
+    "mwritescode/slither-audited-smart-contracts": {
+      "status": "error",
+      "error": "Dataset scripts are no longer supported, but found slither-audited-smart-contracts.py",
+      "rows_stored": 0
+    },
+    "forta/malicious-smart-contract-dataset": {
+      "status": "fetched",
+      "rows_stored": 2000,
+      "total_available": 2000
+    }
+  },
+  "total_rows": 3972,
+  "total_datasets": 4,
+  "db_path": "/Users/nova/AgentAI/training_data/hf_training.db"
+}

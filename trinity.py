@@ -146,6 +146,185 @@ def cmd_fetch_training(args):
     print(json.dumps(result, indent=2))
 
 
+def cmd_audit(args):
+    """Full audit: clone repo → scan → RAO → 8 gates → reports."""
+    from core.audit_runner import AuditRunner
+    from core.models import CURATED_MODELS
+    model = getattr(args, "model", None) or CURATED_MODELS[0]
+    runner = AuditRunner(
+        model=model,
+        max_iterations=getattr(args, "iterations", 10),
+        platform=getattr(args, "platform", "Immunefi"),
+        branch=getattr(args, "branch", None),
+    )
+    result = runner.run(args.repo)
+    print(json.dumps(result, indent=2, default=str))
+
+
+def cmd_report(args):
+    """Write a submission report from a verified finding JSON."""
+    from core.report_writer import ReportWriter
+    from core.model_router import ModelRouter
+    router = ModelRouter()
+    writer = ReportWriter(router=router)
+
+    import json as _json
+    gate_data = {}
+    if getattr(args, "gate_data", None):
+        with open(args.gate_data) as f:
+            gate_data = _json.load(f)
+
+    meta = writer.write(
+        hypothesis=args.hypothesis,
+        gate_data=gate_data,
+        pipeline_result={},
+        platform=getattr(args, "platform", "Immunefi"),
+    )
+    print(json.dumps(meta, indent=2))
+
+
+def cmd_router_status(args):
+    """Show LLM routing status: Anthropic + Ollama fallback."""
+    from core.model_router import ModelRouter
+    router = ModelRouter()
+    status = router.status()
+    print(json.dumps(status, indent=2))
+
+
+def cmd_rpc_status(args):
+    """Show on-chain RPC connection status and latest block."""
+    from core.onchain_client import OnChainClient
+    client = OnChainClient(rpc_url=getattr(args, "rpc", "") or "")
+    status = client.status()
+    print(json.dumps(status, indent=2))
+
+
+def cmd_rpc_read(args):
+    """Read on-chain state from a live contract."""
+    from core.onchain_client import OnChainClient
+    client = OnChainClient(rpc_url=getattr(args, "rpc", "") or "")
+    if not client.available:
+        print('{"error": "ETH_RPC_URL not set — export ETH_RPC_URL=https://..."}')
+        sys.exit(1)
+    result = client.validate_hypothesis_state(
+        contract=args.address,
+        hypothesis=getattr(args, "hypothesis", ""),
+    )
+    print(json.dumps(result, indent=2, default=str))
+
+
+def cmd_ask(args):
+    """Send a prompt through the ModelRouter (uses Ollama if Anthropic unavailable)."""
+    from core.model_router import ModelRouter
+    router = ModelRouter(prefer_local=getattr(args, "local", False))
+    response = router.complete(
+        prompt=args.prompt,
+        gate=getattr(args, "gate", None),
+        think=getattr(args, "think", False),
+    )
+    print(f"[via {router.last_route}]\n")
+    print(response)
+
+
+def cmd_fetch_hf(args):
+    """Fetch smart contract security datasets from Hugging Face."""
+    from core.hf_fetcher import HuggingFaceFetcher
+    fetcher = HuggingFaceFetcher()
+    priorities = None
+    if getattr(args, "priority", None):
+        priorities = [int(p) for p in args.priority.split(",")]
+    result = fetcher.fetch_all(
+        priorities=priorities,
+        force_refresh=getattr(args, "force", False),
+    )
+    print(json.dumps(result, indent=2, default=str))
+    fetcher.close()
+
+
+def cmd_analyze(args):
+    """LLM-powered contract analysis — reads real source, generates hypotheses."""
+    from core.llm_auditor import LLMAuditor
+    focus = args.focus.split(",") if getattr(args, "focus", None) else None
+    auditor = LLMAuditor(max_functions=getattr(args, "max_functions", 15))
+    hypotheses = auditor.analyze(
+        args.contract,
+        focus_functions=focus,
+        verbose=True,
+    )
+    print(f"\n{'='*60}")
+    print(f"  {len(hypotheses)} hypothesis(es) from LLM source analysis")
+    print(f"{'='*60}\n")
+    for i, h in enumerate(hypotheses, 1):
+        print(f"[{i}] [{h.source_function}()] {h.text}\n")
+    if getattr(args, "json", False):
+        import json
+        print(json.dumps([{
+            "text": h.text,
+            "function": h.source_function,
+            "file": h.source_file,
+            "citations": h.citations,
+        } for h in hypotheses], indent=2))
+
+
+def cmd_hf_search(args):
+    """Search HuggingFace training data for vulnerability patterns."""
+    from core.hf_fetcher import HuggingFaceFetcher
+    fetcher = HuggingFaceFetcher()
+    results = fetcher.search(
+        args.query,
+        dataset_id=getattr(args, "dataset", None),
+        limit=getattr(args, "limit", 10),
+    )
+    print(json.dumps(results, indent=2, default=str))
+    fetcher.close()
+
+
+def cmd_ingest(args):
+    """Ingest threat intelligence from all sources into RAOBrain-ready Hypothesis objects."""
+    from core.data_ingestor import DataIngestor
+    ingestor = DataIngestor()
+    max_per = getattr(args, "max", 200)
+
+    if getattr(args, "feed", None):
+        findings = ingestor.load_feed(args.feed)
+        print(f"[ingest] Loaded {len(findings)} findings from {args.feed}")
+    else:
+        findings = ingestor.ingest_all(max_per_source=max_per)
+
+    if getattr(args, "stats", False):
+        print(json.dumps(ingestor.stats(), indent=2))
+        ingestor.close()
+        return
+
+    hypotheses = ingestor.to_hypotheses(findings)
+    ingestor.close()
+
+    print(f"\n{'='*60}")
+    print(f"  {len(hypotheses)} hypotheses ingested from threat intelligence")
+    print(f"{'='*60}\n")
+
+    for i, h in enumerate(hypotheses[:20], 1):
+        print(f"[{i:02d}] [{h.score:.2f}] [{h.pattern_id}] {h.text[:100]}")
+
+    if len(hypotheses) > 20:
+        print(f"  ... and {len(hypotheses)-20} more")
+
+    if getattr(args, "json", False):
+        print(json.dumps([h.to_dict() for h in hypotheses], indent=2))
+
+    if getattr(args, "seed_rao", False) and hypotheses:
+        from core.rao_brain import RAOBrain
+        brain = RAOBrain()
+        for h in hypotheses:
+            brain._observation_log.append({
+                "pattern_id": h.pattern_id,
+                "verdict": "INGESTED",
+                "gate": 0,
+                "details": h.rationale,
+            })
+        print(f"\n[ingest] Seeded RAOBrain with {len(hypotheses)} historical findings")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="trinity",
@@ -214,6 +393,76 @@ def main():
     p = subs.add_parser("scan", help="Quick automated vulnerability scan")
     p.add_argument("--path", required=True, help="Path to scan (file or directory)")
     p.set_defaults(func=cmd_scan)
+
+    # audit
+    p = subs.add_parser("audit", help="Full audit: clone repo → scan → RAO → 8 gates → reports")
+    p.add_argument("--repo", required=True, help="GitHub URL to audit (e.g. https://github.com/morpho-org/morpho-blue)")
+    p.add_argument("--model", default="claude-fable-5", help="LLM model")
+    p.add_argument("--iterations", type=int, default=10, help="Max RAO iterations per dir")
+    p.add_argument("--platform", default="Immunefi", choices=["Immunefi", "Cantina", "Sherlock"])
+    p.add_argument("--branch", help="Git branch to audit (default: main)")
+    p.set_defaults(func=cmd_audit)
+
+    # report
+    p = subs.add_parser("report", help="Write submission report from verified finding")
+    p.add_argument("--hypothesis", required=True, help="IF/THEN/BECAUSE hypothesis")
+    p.add_argument("--gate-data", help="Path to gate_data JSON file")
+    p.add_argument("--platform", default="Immunefi", choices=["Immunefi", "Cantina", "Sherlock"])
+    p.set_defaults(func=cmd_report)
+
+    # router-status
+    p = subs.add_parser("router-status", help="Show LLM routing: Anthropic primary + Ollama fallback")
+    p.set_defaults(func=cmd_router_status)
+
+    # rpc-status
+    p = subs.add_parser("rpc-status", help="Show on-chain RPC connection status and latest block")
+    p.add_argument("--rpc", help="Override ETH_RPC_URL for this call")
+    p.set_defaults(func=cmd_rpc_status)
+
+    # rpc-read
+    p = subs.add_parser("rpc-read", help="Read live on-chain state from a contract address")
+    p.add_argument("--address", required=True, help="Contract address (0x...)")
+    p.add_argument("--hypothesis", default="", help="Hypothesis text (helps focus state reads)")
+    p.add_argument("--rpc", help="Override ETH_RPC_URL for this call")
+    p.set_defaults(func=cmd_rpc_read)
+
+    # ask
+    p = subs.add_parser("ask", help="Send a prompt through the ModelRouter")
+    p.add_argument("--prompt", required=True, help="Prompt text")
+    p.add_argument("--gate", type=int, help="Gate number (1-2 auto-routes to local Ollama)")
+    p.add_argument("--local", action="store_true", help="Force Ollama (skip Anthropic)")
+    p.add_argument("--think", action="store_true", help="Enable Gemma 4 thinking mode")
+    p.set_defaults(func=cmd_ask)
+
+    # analyze
+    p = subs.add_parser("analyze", help="LLM reads real Solidity source → contract-specific hypotheses")
+    p.add_argument("--contract", required=True, help="Path to .sol file or directory")
+    p.add_argument("--focus", help="Comma-separated function names to prioritize (e.g. liquidate,supply)")
+    p.add_argument("--max-functions", type=int, default=15, help="Max functions to audit (default: 15)")
+    p.add_argument("--json", action="store_true", help="Also output JSON")
+    p.set_defaults(func=cmd_analyze)
+
+    # fetch-hf
+    p = subs.add_parser("fetch-hf", help="Fetch HuggingFace smart contract security datasets")
+    p.add_argument("--priority", help="Comma-separated priorities to fetch (e.g. 1,2,3 — default: all)")
+    p.add_argument("--force", action="store_true", help="Re-download even if cached")
+    p.set_defaults(func=cmd_fetch_hf)
+
+    # hf-search
+    p = subs.add_parser("hf-search", help="Search HuggingFace training data")
+    p.add_argument("--query", required=True, help="Term to search for")
+    p.add_argument("--dataset", help="Filter by dataset ID")
+    p.add_argument("--limit", type=int, default=10)
+    p.set_defaults(func=cmd_hf_search)
+
+    # ingest
+    p = subs.add_parser("ingest", help="Pull threat intel from DeFiHackLabs + HuggingFace → Hypothesis objects")
+    p.add_argument("--max", type=int, default=200, help="Max findings per source (default: 200)")
+    p.add_argument("--feed", help="Load custom JSON feed file instead of live sources")
+    p.add_argument("--stats", action="store_true", help="Show cache stats only")
+    p.add_argument("--seed-rao", action="store_true", help="Seed RAOBrain observation log with findings")
+    p.add_argument("--json", action="store_true", help="Output full JSON")
+    p.set_defaults(func=cmd_ingest)
 
     # findings
     p = subs.add_parser("findings", help="Query findings database")

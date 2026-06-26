@@ -1,0 +1,26 @@
+# Nexus Trinity — dependency lock file
+# Install: pip3 install -r requirements.txt
+
+# ── Core LLM ─────────────────────────────────────────────────────────────────
+anthropic>=0.40.0          # Primary LLM provider (claude-fable-5)
+
+# ── Crypto / ABI encoding ────────────────────────────────────────────────────
+pysha3>=1.0.2              # Keccak-256 for EVM function selectors (eth_call ABI)
+
+# ── Data / training ──────────────────────────────────────────────────────────
+datasets>=2.18.0           # HuggingFace datasets (hf_fetcher.py)
+huggingface-hub>=0.22.0    # HF model hub auth
+
+# ── Stdlib only (no extra install) ───────────────────────────────────────────
+# sqlite3     — KG, findings DB, HF training DB
+# pathlib     — file ops
+# asyncio     — concurrent function auditing
+# urllib      — RPC + Ollama calls (no httpx/requests needed)
+# re          — Solidity parsing
+# hashlib     — SHA256 (non-EVM uses only)
+# concurrent.futures — M5 Max parallel scoring
+# dataclasses — Hypothesis, GateData, etc.
+# subprocess  — forge / git invocations
+
+# ── Optional: faster parallel execution ──────────────────────────────────────
+# uvloop>=0.19.0    # faster asyncio event loop on macOS (uncomment if needed)
