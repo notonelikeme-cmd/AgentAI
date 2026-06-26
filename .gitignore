@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.claude/defi_kg.db
+.claude/*.db
+*.egg-info/
+dist/
+build/
+.env
+*.log
+out/
+cache/
