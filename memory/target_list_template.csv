@@ -1,0 +1,4 @@
+Company Name,Domain,Industry,Size,Security Posture,Business Impact,Budget,Visibility,Bug Bounty Status,Overall Score,Contact Email,Status,Notes
+Example Corp,example.com,SaaS,Mid-market,7,6,5,6,8,68,security@example.com,pending,"Missing HSTS, weak CORS, outdated CMS"
+TechStart Inc,techstart.io,Fintech,Startup,8,8,4,5,9,72,founders@techstart.io,pending,"Handles payments, exposed admin panel, no WAF"
+RetailCo,retail.biz,E-commerce,Enterprise,6,7,8,7,5,65,security@retail.biz,contacted,"PII exposure risk, session issues"
