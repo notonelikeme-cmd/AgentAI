@@ -146,9 +146,14 @@ def cmd_fetch_training(args):
 
 def cmd_audit(args):
     """Full audit: clone repo → scan → RAO → 8 gates → reports."""
+    from core.gates.gate0_novelty import Gate0Novelty
     from core.audit_runner import AuditRunner
-    from core.models import CURATED_MODELS
-    model = getattr(args, "model", None) or CURATED_MODELS[0]
+    model = getattr(args, "model", None) or "claude-fable-5"
+    gate0 = Gate0Novelty()
+    g0 = gate0.check(f"full audit of {args.repo}")
+    if not g0.get("novel", True):
+        print(json.dumps({"gate0": "DUPLICATE", "reason": g0}, indent=2))
+        sys.exit(1)
     runner = AuditRunner(
         model=model,
         max_iterations=getattr(args, "iterations", 10),
@@ -215,13 +220,13 @@ def cmd_h1_default(args):
 
 
 def cmd_h1_profile(args):
-    from core.h1_client import get_profile, get_signal
+    from core.h1_client import get_profile
     profile = get_profile()
     attrs = profile.get("data", {}).get("attributes", {})
     print(f"Handle:     {attrs.get('username', '')}")
-    print(f"Signal:     {attrs.get('signal', 0):.1f}")
+    print(f"Signal:     {attrs.get('signal') or 0:.1f}")
     print(f"Reputation: {attrs.get('reputation', 0)}")
-    print(f"Impact:     {attrs.get('impact', 0):.1f}")
+    print(f"Impact:     {attrs.get('impact') or 0:.1f}")
 
 
 def cmd_h1_programs(args):
@@ -259,7 +264,8 @@ def cmd_h1_scan(args):
         print(f"\n{'='*60}")
         print(f"Program: {r['handle']} | Max bounty: ${r.get('max_bounty', 0):,.0f}")
         print(f"URL: {r.get('url', '')}")
-        print(f"\n{r['ai_analysis'][:1000]}...")
+        analysis = r.get('ai_analysis') or ""
+        print(f"\n{analysis[:1000]}{'...' if len(analysis) > 1000 else ''}")
 
 
 def cmd_h1_reports(args):
@@ -274,7 +280,7 @@ def cmd_h1_check(args):
     print(f"Eligible: {'YES' if result['eligible'] else 'NO'}")
     print(f"Submission state: {result['submission_state']}")
     print(f"Bounties offered: {result['offers_bounties']}")
-    print(f"Signal required: {result['signal_required']} | Your signal: {result['my_signal']:.1f}")
+    print(f"Signal required: {result['signal_required']} | Your signal: {result['my_signal'] or 0:.1f}")
     if result.get("blocker"):
         print(f"Blocker: {result['blocker']}")
 
@@ -318,13 +324,14 @@ def cmd_analyze(args):
         focus_functions=focus,
         verbose=True,
     )
-    print(f"\n{'='*60}")
-    print(f"  {len(hypotheses)} hypothesis(es) from LLM source analysis")
-    print(f"{'='*60}\n")
+    import sys as _sys
+    _out = _sys.stderr if getattr(args, "json", False) else _sys.stdout
+    print(f"\n{'='*60}", file=_out)
+    print(f"  {len(hypotheses)} hypothesis(es) from LLM source analysis", file=_out)
+    print(f"{'='*60}\n", file=_out)
     for i, h in enumerate(hypotheses, 1):
-        print(f"[{i}] [{h.source_function}()] {h.text}\n")
+        print(f"[{i}] [{h.source_function}()] {h.text}\n", file=_out)
     if getattr(args, "json", False):
-        import json
         print(json.dumps([{
             "text": h.text,
             "function": h.source_function,
@@ -352,29 +359,30 @@ def cmd_ingest(args):
     ingestor = DataIngestor()
     max_per = getattr(args, "max", 200)
 
-    if getattr(args, "feed", None):
-        findings = ingestor.load_feed(args.feed)
-        print(f"[ingest] Loaded {len(findings)} findings from {args.feed}")
-    else:
-        findings = ingestor.ingest_all(max_per_source=max_per)
-
     if getattr(args, "stats", False):
         print(json.dumps(ingestor.stats(), indent=2))
         ingestor.close()
         return
 
+    if getattr(args, "feed", None):
+        findings = ingestor.load_feed(args.feed)
+        print(f"[ingest] Loaded {len(findings)} findings from {args.feed}", file=sys.stderr)
+    else:
+        findings = ingestor.ingest_all(max_per_source=max_per)
+
     hypotheses = ingestor.to_hypotheses(findings)
     ingestor.close()
 
-    print(f"\n{'='*60}")
-    print(f"  {len(hypotheses)} hypotheses ingested from threat intelligence")
-    print(f"{'='*60}\n")
+    _out = sys.stderr if getattr(args, "json", False) else sys.stdout
+    print(f"\n{'='*60}", file=_out)
+    print(f"  {len(hypotheses)} hypotheses ingested from threat intelligence", file=_out)
+    print(f"{'='*60}\n", file=_out)
 
     for i, h in enumerate(hypotheses[:20], 1):
-        print(f"[{i:02d}] [{h.score:.2f}] [{h.pattern_id}] {h.text[:100]}")
+        print(f"[{i:02d}] [{h.score:.2f}] [{h.pattern_id}] {h.text[:100]}", file=_out)
 
     if len(hypotheses) > 20:
-        print(f"  ... and {len(hypotheses)-20} more")
+        print(f"  ... and {len(hypotheses)-20} more", file=_out)
 
     if getattr(args, "json", False):
         print(json.dumps([h.to_dict() for h in hypotheses], indent=2))
@@ -443,7 +451,7 @@ def main():
     p.add_argument("--hypothesis", required=True, help="Falsifiable hypothesis string")
     p.add_argument("--contract", required=True, help="Path to target contract")
     p.add_argument("--block", type=int, help="Fork block number")
-    p.add_argument("--model", help="Claude model to use (default: claude-fable-5)")
+    p.add_argument("--model", default="claude-fable-5", help="Claude model to use")
     p.set_defaults(func=cmd_pipeline)
 
     # rao
@@ -453,7 +461,7 @@ def main():
     p.add_argument("--mode", choices=["default", "differential"], default="default")
     p.add_argument("--baseline", help="Baseline protocol for differential mode")
     p.add_argument("--iterations", type=int, default=5, help="Max RAO iterations")
-    p.add_argument("--model", help="Claude model to use (default: claude-fable-5)")
+    p.add_argument("--model", default="claude-fable-5", help="Claude model to use")
     p.set_defaults(func=cmd_rao)
 
     # scan
