@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from core.models import CURATED_MODELS, model_profile
+from core.gate_prompts import get_gate_prompt, build_gate_context
 
 
 @dataclass
@@ -262,14 +263,39 @@ class VerificationLoop:
 
     async def _gate6_adversarial(self, data: dict) -> GateData:
         adv = data.get("gate6_adversarial_result", {})
-        if not adv:
-            return GateData(
-                6, "FAIL",
-                "No adversarial review. Launch verification-adversary agent to attempt refutation."
-            )
-        if adv.get("refuted"):
-            return GateData(6, "FAIL", f"Refuted: {adv.get('reason', 'see adversarial review')}")
-        return GateData(6, "PASS", "Survived adversarial challenge", adv)
+        if adv:
+            if adv.get("refuted"):
+                return GateData(6, "FAIL", f"Refuted: {adv.get('reason', 'see adversarial review')}")
+            return GateData(6, "PASS", "Survived adversarial challenge", adv)
+
+        # Auto-adversarial via ModelRouter when no pre-supplied result
+        try:
+            from core.model_router import ModelRouter
+            from core.analysis.defi_kg import DeFiKnowledgeGraph
+            router = ModelRouter()
+            hypothesis = data.get("hypothesis", "")
+
+            # Inject KG context — find patterns matching this hypothesis
+            kg = DeFiKnowledgeGraph()
+            related = kg.retrieve(hypothesis[:200])
+            kg.close()
+
+            system = get_gate_prompt(6)
+            prompt = build_gate_context(6, hypothesis, related)
+
+            response = router.complete(prompt, system=system, gate=6, think=True)
+
+            passed = any(k in response.upper() for k in ("PASSES GATE 6", "PASSES GATE6", "NO VALID REFUTATION"))
+            blocked = any(k in response.upper() for k in ("BLOCKED", "REFUTED", "VALID DEFENSE"))
+
+            result_data = {"response": response[:500], "via": router.last_route, "kg_patterns_checked": len(related)}
+
+            if blocked and not passed:
+                return GateData(6, "FAIL", f"Auto-adversarial refuted (via {router.last_route})", result_data)
+            return GateData(6, "PASS", f"Survived auto-adversarial (via {router.last_route})", result_data)
+
+        except Exception as e:
+            return GateData(6, "FAIL", f"Adversarial review unavailable: {e}. Run verification-adversary agent.")
 
     async def _gate7_reproducibility(self, data: dict) -> GateData:
         repro = data.get("gate7_reproduction_guide")
@@ -313,21 +339,20 @@ class VerificationLoop:
             net_profit = econ.get("net_profit", 0)
             adv_notes  = data.get("gate6", {}).get("notes", "none")
 
-            system = (
-                "You are a protocol owner defending your code against a security finding. "
-                "Your goal: find ANY valid reason the finding is incorrect, overstated, or "
-                "not economically viable under optimistic but realistic assumptions. "
-                "Be rigorous but fair — only raise critiques that would genuinely hold up to scrutiny. "
-                "Reply in exactly this format:\n"
-                "VERDICT: VALID_CRITIQUE or NO_VALID_CRITIQUE\n"
-                "CRITIQUE: <one sentence — the strongest counter-argument, or 'none'>\n"
-                "CONFIDENCE: high / medium / low"
-            )
+            from core.analysis.defi_kg import DeFiKnowledgeGraph
+            kg = DeFiKnowledgeGraph()
+            related = kg.retrieve(hypothesis[:200])
+            kg.close()
+
+            system = get_gate_prompt(8)
             prompt = (
-                f"Finding:\n{hypothesis}\n\n"
+                build_gate_context(8, hypothesis, related) + "\n\n"
                 f"Net profit after all costs: ${net_profit:,.0f}\n"
-                f"Adversarial notes from Gate 6: {adv_notes}\n\n"
-                "Is there a valid reason to reject or downgrade this finding?"
+                f"Gate 6 adversarial notes: {adv_notes}\n\n"
+                "Reply in exactly this format:\n"
+                "VERDICT: APPROVED FOR SUBMISSION or BLOCKED\n"
+                "CRITIQUE: <one sentence — the strongest counter-argument, or 'none found'>\n"
+                "CONFIDENCE: high / medium / low"
             )
 
             response = router.complete(prompt, system=system, gate=8)
@@ -352,7 +377,7 @@ class VerificationLoop:
                 "via": router.last_route,
             }
 
-            if verdict == "VALID_CRITIQUE" and confidence in ("high", "medium"):
+            if verdict == "BLOCKED" and confidence in ("high", "medium"):
                 try:
                     from core.skill_builder import SkillBuilder
                     SkillBuilder().log_false_positive(hypothesis, critique, kill_rule="Gate 8 Doctor")

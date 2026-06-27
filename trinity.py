@@ -213,6 +213,75 @@ def cmd_rpc_read(args):
     print(json.dumps(result, indent=2, default=str))
 
 
+def cmd_h1_default(args):
+    print("Usage: trinity h1 <subcommand>  (programs | scope | scan | reports | profile | check)")
+
+
+def cmd_h1_profile(args):
+    from core.h1_client import get_profile, get_signal
+    profile = get_profile()
+    attrs = profile.get("data", {}).get("attributes", {})
+    print(f"Handle:     {attrs.get('username', '')}")
+    print(f"Signal:     {attrs.get('signal', 0):.1f}")
+    print(f"Reputation: {attrs.get('reputation', 0)}")
+    print(f"Impact:     {attrs.get('impact', 0):.1f}")
+
+
+def cmd_h1_programs(args):
+    from core.h1_scanner import find_best_programs
+    programs = find_best_programs(n=args.n, min_bounty=args.min_bounty)
+    print(f"\n{'Handle':<30} {'Max Bounty':>12} {'Avg Bounty':>12} {'Response %':>10}")
+    print("-" * 68)
+    for p in programs:
+        print(
+            f"{p['handle']:<30} ${p['max_bounty']:>10,.0f} ${p['avg_bounty']:>10,.0f} "
+            f"{p.get('response_efficiency', 0):>9.0f}%"
+        )
+    print(f"\nTotal eligible: {len(programs)}")
+
+
+def cmd_h1_scope(args):
+    from core.h1_scanner import analyze_scope, learn_scope_and_strategize
+    if args.deep:
+        result = learn_scope_and_strategize(args.handle)
+        print(result)
+    else:
+        result = analyze_scope(args.handle)
+        print(f"\n--- SCOPE ---\n{result['scope_text']}")
+        print(f"\n--- AI ANALYSIS ---\n{result['ai_analysis']}")
+
+
+def cmd_h1_scan(args):
+    from core.h1_scanner import run_full_scan
+    results = run_full_scan(
+        n_programs=args.n,
+        min_bounty=args.min_bounty,
+        output_file=getattr(args, "output", None),
+    )
+    for r in results:
+        print(f"\n{'='*60}")
+        print(f"Program: {r['handle']} | Max bounty: ${r.get('max_bounty', 0):,.0f}")
+        print(f"URL: {r.get('url', '')}")
+        print(f"\n{r['ai_analysis'][:1000]}...")
+
+
+def cmd_h1_reports(args):
+    from core.h1_scanner import monitor_reports
+    monitor_reports(verbose=True)
+
+
+def cmd_h1_check(args):
+    from core.h1_client import check_eligibility
+    result = check_eligibility(args.handle)
+    print(f"\nProgram: {result['handle']}")
+    print(f"Eligible: {'YES' if result['eligible'] else 'NO'}")
+    print(f"Submission state: {result['submission_state']}")
+    print(f"Bounties offered: {result['offers_bounties']}")
+    print(f"Signal required: {result['signal_required']} | Your signal: {result['my_signal']:.1f}")
+    if result.get("blocker"):
+        print(f"Blocker: {result['blocker']}")
+
+
 def cmd_ask(args):
     """Send a prompt through the ModelRouter (uses Ollama if Anthropic unavailable)."""
     from core.model_router import ModelRouter
@@ -221,6 +290,7 @@ def cmd_ask(args):
         prompt=args.prompt,
         gate=getattr(args, "gate", None),
         think=getattr(args, "think", False),
+        code=getattr(args, "code", False),
     )
     print(f"[via {router.last_route}]\n")
     print(response)
@@ -432,6 +502,7 @@ def main():
     p.add_argument("--gate", type=int, help="Gate number (1-2 auto-routes to local Ollama)")
     p.add_argument("--local", action="store_true", help="Force Ollama (skip Anthropic)")
     p.add_argument("--think", action="store_true", help="Enable Gemma 4 thinking mode")
+    p.add_argument("--code", action="store_true", help="Route to Qwen2.5-Coder (Solidity/code tasks)")
     p.set_defaults(func=cmd_ask)
 
     # analyze
@@ -471,6 +542,38 @@ def main():
     p.add_argument("--show", metavar="ID", help="Show finding by ID")
     p.add_argument("--add", action="store_true")
     p.set_defaults(func=cmd_findings)
+
+    # h1 — HackerOne intelligence
+    h1 = subs.add_parser("h1", help="HackerOne intelligence: programs, scope, reports")
+    h1_subs = h1.add_subparsers(dest="h1_cmd")
+
+    p = h1_subs.add_parser("programs", help="List eligible high-bounty programs")
+    p.add_argument("--min-bounty", type=float, default=10_000, help="Min max_bounty filter (default: $10K)")
+    p.add_argument("--n", type=int, default=20, help="Number of programs to fetch (default: 20)")
+    p.set_defaults(func=cmd_h1_programs)
+
+    p = h1_subs.add_parser("scope", help="Pull and AI-analyze scope for a program")
+    p.add_argument("--handle", required=True, help="Program handle (e.g. polygon)")
+    p.add_argument("--deep", action="store_true", help="Run deep strategic analysis (slower)")
+    p.set_defaults(func=cmd_h1_scope)
+
+    p = h1_subs.add_parser("scan", help="Full scan: find eligible programs + analyze scope with AI")
+    p.add_argument("--n", type=int, default=5, help="Number of programs to deep-scan (default: 5)")
+    p.add_argument("--min-bounty", type=float, default=25_000, help="Min bounty to consider (default: $25K)")
+    p.add_argument("--output", help="Save results to JSON file")
+    p.set_defaults(func=cmd_h1_scan)
+
+    p = h1_subs.add_parser("reports", help="Check status of your submitted reports")
+    p.set_defaults(func=cmd_h1_reports)
+
+    p = h1_subs.add_parser("profile", help="Show your H1 profile and signal score")
+    p.set_defaults(func=cmd_h1_profile)
+
+    p = h1_subs.add_parser("check", help="Check eligibility for a specific program")
+    p.add_argument("--handle", required=True, help="Program handle to check")
+    p.set_defaults(func=cmd_h1_check)
+
+    h1.set_defaults(func=cmd_h1_default)
 
     args = parser.parse_args()
     args.func(args)

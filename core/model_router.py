@@ -1,18 +1,21 @@
-"""ModelRouter — three-tier LLM routing with circuit breakers.
+"""ModelRouter — four-tier LLM routing with circuit breakers.
 
 Routing chain:
   1. Anthropic claude-fable-5       (primary — all gates)
-  2. Ollama deepseek-r1:70b         (reasoning fallback — gates 3-8)
-  3. Ollama gemma4:latest           (fast fallback — gates 1-2, or when DeepSeek unavailable)
+  2. Ollama deepseek-r1:14b         (reasoning fallback — gates 3-8)
+  3. Ollama qwen2.5-coder:14b       (code reading fallback — LLMAuditor, gate 2)
+  4. Ollama gemma4:latest           (fast fallback — gates 1-2, or last resort)
 
 Gate routing logic:
   - Gates 1-2 (cheap, high-volume): Gemma4 by default
   - Gates 3-8 (reasoning-heavy): DeepSeek-R1 when Anthropic is unavailable
+  - code=True: Qwen2.5-Coder for source reading and PoC generation
   - prefer_local=True: DeepSeek-R1 for all gates (skip Anthropic)
 
 Circuit breakers prevent cascading failures:
   - Anthropic: opens after 3 failures, resets after 60s
   - DeepSeek:  opens after 3 failures, resets after 45s
+  - Qwen:      opens after 3 failures, resets after 45s
   - Gemma4:    opens after 5 failures, resets after 30s
 """
 from __future__ import annotations
@@ -27,7 +30,8 @@ from core.models import CURATED_MODELS, model_profile, resolve_effort
 
 _OLLAMA_BASE    = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 _GEMMA_MODEL    = os.environ.get("OLLAMA_MODEL", "gemma4:latest")
-_DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-r1:70b")
+_DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-r1:14b")
+_QWEN_MODEL     = os.environ.get("QWEN_MODEL", "qwen2.5-coder:14b")
 _EMBED_MODEL    = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 
 # Gates cheap enough for Gemma4 (fast, low reasoning demand)
@@ -65,6 +69,7 @@ def _ollama_chat(
     temperature: float = 0.2,
     think: bool = False,
     timeout: int = 180,
+    num_ctx: int = 32768,
 ) -> str:
     """Call Ollama /api/chat. Returns assistant content string."""
     messages: List[Dict[str, str]] = []
@@ -76,7 +81,11 @@ def _ollama_chat(
         "model": model,
         "messages": messages,
         "stream": False,
-        "options": {"temperature": temperature},
+        "options": {
+            "temperature": temperature,
+            "num_ctx": num_ctx,
+            "num_predict": -1,
+        },
     }
     if think:
         payload["think"] = True
@@ -197,10 +206,12 @@ class ModelRouter:
 
         self._cb_anthropic = _CircuitBreaker("anthropic", threshold=3, reset_seconds=60)
         self._cb_deepseek  = _CircuitBreaker("deepseek",  threshold=3, reset_seconds=45)
+        self._cb_qwen      = _CircuitBreaker("qwen",      threshold=3, reset_seconds=45)
         self._cb_gemma     = _CircuitBreaker("gemma",     threshold=5, reset_seconds=30)
 
         # Cache which Ollama models are available (checked once per instance)
         self._deepseek_available: Optional[bool] = None
+        self._qwen_available:     Optional[bool] = None
         self._embed_available:    Optional[bool] = None
 
     @property
@@ -213,6 +224,11 @@ class ModelRouter:
         if self._deepseek_available is None:
             self._deepseek_available = _ollama_available() and _model_pulled(_DEEPSEEK_MODEL)
         return self._deepseek_available
+
+    def _has_qwen(self) -> bool:
+        if self._qwen_available is None:
+            self._qwen_available = _ollama_available() and _model_pulled(_QWEN_MODEL)
+        return self._qwen_available
 
     def _has_embed(self) -> bool:
         if self._embed_available is None:
@@ -228,16 +244,23 @@ class ModelRouter:
         gate: Optional[int] = None,
         max_tokens: int = 4096,
         think: bool = False,
+        code: bool = False,
     ) -> str:
         """
-        Route a completion. Gate determines which local model to prefer.
+        Route a completion. Gate and task type determine which local model to use.
 
         Gates 1-2    → Gemma4 (fast, no reasoning needed)
         Gates 3-8    → DeepSeek-R1 when Anthropic unavailable
+        code=True    → Qwen2.5-Coder (Solidity reading, PoC generation)
         prefer_local → DeepSeek-R1 for everything
         """
-        is_cheap_gate    = gate in _LOCAL_GATES
+        is_cheap_gate     = gate in _LOCAL_GATES
         is_reasoning_gate = gate in _REASONING_GATES
+
+        # Code tasks → Qwen2.5-Coder when Anthropic unavailable
+        if code and not self.prefer_local and not os.environ.get("ANTHROPIC_API_KEY"):
+            if self._has_qwen() and not self._cb_qwen.is_open:
+                return self._call_qwen(prompt, system, think)
 
         # Fast path: cheap gates go straight to Gemma4
         if is_cheap_gate and not self.prefer_local and _ollama_available():
@@ -276,17 +299,32 @@ class ModelRouter:
     def _local_fallback(
         self, prompt: str, system: Optional[str], think: bool, prefer_reasoning: bool
     ) -> str:
-        """Choose between DeepSeek and Gemma4 based on task type."""
+        """Choose between DeepSeek, Qwen, and Gemma4 based on task type."""
         if prefer_reasoning and self._has_deepseek() and not self._cb_deepseek.is_open:
             return self._call_deepseek(prompt, system, think)
+        if self._has_qwen() and not self._cb_qwen.is_open:
+            return self._call_qwen(prompt, system, think)
         if _ollama_available() and not self._cb_gemma.is_open:
             return self._call_gemma(prompt, system, think)
         if self._has_deepseek() and not self._cb_deepseek.is_open:
             return self._call_deepseek(prompt, system, think)
         raise RuntimeError(
             "[ModelRouter] All backends unavailable. "
-            "Check: ANTHROPIC_API_KEY, ollama serve, ollama pull deepseek-r1:70b"
+            "Check: ANTHROPIC_API_KEY, ollama serve, "
+            "ollama pull deepseek-r1:14b, ollama pull qwen2.5-coder:14b"
         )
+
+    def _call_qwen(self, prompt: str, system: Optional[str], think: bool) -> str:
+        if self._cb_qwen.is_open:
+            raise RuntimeError("[ModelRouter] Qwen circuit OPEN")
+        try:
+            result = _ollama_chat(prompt, system, _QWEN_MODEL, think=think, timeout=180)
+            self._cb_qwen.record_success()
+            self._last_route = "qwen"
+            return result
+        except Exception as e:
+            self._cb_qwen.record_failure()
+            raise
 
     def _call_deepseek(self, prompt: str, system: Optional[str], think: bool) -> str:
         if self._cb_deepseek.is_open:
@@ -355,15 +393,18 @@ class ModelRouter:
         return {
             "primary":           self.primary_model,
             "deepseek_model":    _DEEPSEEK_MODEL,
+            "qwen_model":        _QWEN_MODEL,
             "gemma_model":       _GEMMA_MODEL,
             "embed_model":       _EMBED_MODEL,
             "anthropic_key":     bool(os.environ.get("ANTHROPIC_API_KEY")),
             "ollama_available":  ollama_up,
             "deepseek_pulled":   self._has_deepseek(),
+            "qwen_pulled":       self._has_qwen(),
             "embed_pulled":      self._has_embed(),
             "ollama_models":     models_available,
             "prefer_local":      self.prefer_local,
             "cb_anthropic_open": self._cb_anthropic.is_open,
             "cb_deepseek_open":  self._cb_deepseek.is_open,
+            "cb_qwen_open":      self._cb_qwen.is_open,
             "cb_gemma_open":     self._cb_gemma.is_open,
         }

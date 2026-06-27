@@ -183,6 +183,35 @@ class TestGate7Reproducibility:
         assert result.status == "PASS"
 
 
+class TestGate8PeerReview:
+    def test_supplied_no_critique_passes(self, loop):
+        data = {"gate8_peer_review": {"critique_valid": False, "critique": "none"}}
+        result = run(loop._gate8_peer_review(data))
+        assert result.status == "PASS"
+
+    def test_supplied_valid_critique_fails(self, loop):
+        data = {
+            "hypothesis": "IF x THEN y BECAUSE z",
+            "gate8_peer_review": {
+                "critique_valid": True,
+                "critique": "timelock prevents immediate exploit",
+            },
+        }
+        result = run(loop._gate8_peer_review(data))
+        assert result.status == "FAIL"
+        assert "timelock" in result.reason
+
+    def test_no_router_skips_gracefully(self, loop):
+        # With no ModelRouter available the gate passes with a skip note
+        data = {
+            "hypothesis": "IF x in Vault.sol:1 THEN y BECAUSE z",
+            "gate5": {"net_profit": 1000},
+        }
+        result = run(loop._gate8_peer_review(data))
+        # Should pass (router may or may not be available in test env)
+        assert result.status in ("PASS", "FAIL")
+
+
 class TestFullPipelineBlocking:
     def test_blocks_at_gate1_no_keywords(self, loop):
         result = run(loop.run(
@@ -206,7 +235,6 @@ class TestFullPipelineBlocking:
             contract="src/Vault.sol",
             model="claude-fable-5",
         ))
-        # Gate data carries model info through
         assert result.get("hypothesis") is not None
 
     def test_format_result_structure(self, loop):

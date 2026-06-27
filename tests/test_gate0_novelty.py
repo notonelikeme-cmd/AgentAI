@@ -14,7 +14,8 @@ def gate():
 
 class TestNovelHypotheses:
     def test_novel_hypothesis_passes(self, gate):
-        h = "IF custom hook callback allows re-entry into PoolManager.swap THEN fee accounting is corrupted BECAUSE lock is cleared before hook returns"
+        # Uses words not in DB findings — no fuzzy match should fire
+        h = "IF XYZProtocol2026 bitfield packing overflows THEN epoch counter wraps BECAUSE modular arithmetic"
         result = gate.check(h)
         assert result["novel"] is True
         assert result["recommendation"] == "proceed"

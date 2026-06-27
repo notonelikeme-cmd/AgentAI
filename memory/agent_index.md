@@ -1,0 +1,1 @@
+- [flash-loan-detector](/Users/nova/.claude/agents/flash-loan-detector.md) — flash_loan detector (auto-generated 2026-06-25 22:48, threshold=2)
