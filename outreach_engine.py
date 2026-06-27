@@ -8,6 +8,7 @@ import os
 import json
 import csv
 import subprocess
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -40,13 +41,88 @@ def call_ollama(model, prompt, system_prompt=None):
             input=full_prompt,
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=600  # 10 minutes for longer responses
         )
-        return result.stdout.strip()
+        response = result.stdout.strip()
+        
+        # Debug: print length for verification
+        if len(response) < 50:
+            print(f"[DEBUG] Short response ({len(response)} chars): {response[:100]}")
+        
+        return response
     except subprocess.TimeoutExpired:
-        return f"[Timeout calling {model}]"
+        return f"[Timeout calling {model} after 600s]"
     except Exception as e:
         return f"[Error calling {model}: {e}]"
+
+def parse_json_response(response):
+    """Parse JSON from response, handling markdown code blocks and control characters."""
+    # Remove ANSI escape codes that Ollama might output
+    # Pattern: \x1b[<number>D\x1b[K and similar
+    response = re.sub(r'\x1b\[[0-9]+[A-Za-z]', '', response)  # Remove escape codes
+    response = re.sub(r'\x1b\[K', '', response)  # Remove clear-to-end-of-line
+    
+    # Try to extract JSON from markdown code blocks
+    if '```json' in response:
+        start = response.find('```json') + 7
+        end = response.find('```', start)
+        if end != -1:
+            response = response[start:end].strip()
+    elif '```' in response:
+        start = response.find('```') + 3
+        end = response.find('```', start)
+        if end != -1:
+            response = response[start:end].strip()
+    
+    # Remove any leading/trailing whitespace and common prefixes
+    response = response.strip()
+    if response.startswith('json'):
+        response = response[4:].strip()
+    
+    # Clean up control characters and invalid JSON escapes
+    # Replace literal newlines in strings with spaces
+    # Use a simple character-by-character approach
+    result = []
+    in_string = False
+    escape_next = False
+    
+    for char in response:
+        if escape_next:
+            result.append(char)
+            escape_next = False
+            continue
+            
+        if char == '\\':
+            result.append(char)
+            escape_next = True
+            continue
+            
+        if char == '"':
+            result.append(char)
+            in_string = not in_string
+            continue
+            
+        if in_string and char in '\n\r\x00':
+            # Replace newlines inside strings with space, skip nulls
+            if char != '\x00':
+                result.append(' ')
+            continue
+            
+        if char == '\x00':
+            continue
+            
+        result.append(char)
+    
+    response = ''.join(result)
+    
+    # Try to fix common JSON issues
+    # If response appears truncated, try to close it
+    if response.count('[') > response.count(']'):
+        response = response + ']'
+    if response.count('{') > response.count('}'):
+        response = response + '}'
+    
+    return json.loads(response)
 
 def discover_companies(search_terms=None):
     """Use the discovery model to find potential target companies."""
@@ -72,10 +148,11 @@ def discover_companies(search_terms=None):
     response = call_ollama(MODELS['discovery'], prompt, system_prompt)
     
     try:
-        companies = json.loads(response)
+        companies = parse_json_response(response)
         return companies
-    except json.JSONDecodeError:
-        print(f"Failed to parse discovery response: {response[:200]}")
+    except json.JSONDecodeError as e:
+        print(f"Failed to parse discovery response: {response[:300]}")
+        print(f"Error: {e}")
         return []
 
 def score_companies(companies):
@@ -115,14 +192,15 @@ def score_companies(companies):
         response = call_ollama(MODELS['scoring'], prompt, system_prompt)
         
         try:
-            scoring = json.loads(response)
+            scoring = parse_json_response(response)
             scored.append({
                 **company,
                 **scoring,
                 'scored_at': datetime.now().isoformat()
             })
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
             print(f"Failed to score {company.get('name')}: {response[:200]}")
+            print(f"Error: {e}")
             scored.append({
                 **company,
                 'total_score': 0,
@@ -176,7 +254,12 @@ def save_company_data(companies, scores, outreach_packages):
     # Save scored companies to CSV
     csv_path = TARGETS_DIR / f'scored_companies_{timestamp}.csv'
     if scores:
-        keys = scores[0].keys()
+        # Get all unique keys from all scores, maintaining order
+        all_keys = set()
+        for score in scores:
+            all_keys.update(score.keys())
+        keys = sorted(list(all_keys))  # Sort for consistency
+        
         with open(csv_path, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=keys)
             writer.writeheader()

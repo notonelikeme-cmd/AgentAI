@@ -6,10 +6,69 @@ Builds agents and tools for autonomous outreach operations.
 
 import json
 import os
+import re
 from abc import ABC, abstractmethod
 from typing import Dict, List, Any
 from datetime import datetime
 import subprocess
+
+def parse_json_response(response: str) -> Dict:
+    """Parse JSON from response, handling ANSI codes and markdown blocks."""
+    # Remove ANSI escape codes
+    response = re.sub(r'\x1b\[[0-9]+[A-Za-z]', '', response)
+    response = re.sub(r'\x1b\[K', '', response)
+    
+    # Extract JSON from markdown code blocks
+    if '```json' in response:
+        start = response.find('```json') + 7
+        end = response.find('```', start)
+        if end != -1:
+            response = response[start:end].strip()
+    elif '```' in response:
+        start = response.find('```') + 3
+        end = response.find('```', start)
+        if end != -1:
+            response = response[start:end].strip()
+    
+    response = response.strip()
+    if response.startswith('json'):
+        response = response[4:].strip()
+    
+    # Fix newlines in strings
+    result = []
+    in_string = False
+    escape_next = False
+    
+    for char in response:
+        if escape_next:
+            result.append(char)
+            escape_next = False
+            continue
+        if char == '\\':
+            result.append(char)
+            escape_next = True
+            continue
+        if char == '"':
+            result.append(char)
+            in_string = not in_string
+            continue
+        if in_string and char in '\n\r\x00':
+            if char != '\x00':
+                result.append(' ')
+            continue
+        if char == '\x00':
+            continue
+        result.append(char)
+    
+    response = ''.join(result)
+    
+    # Fix truncation
+    if response.count('[') > response.count(']'):
+        response = response + ']'
+    if response.count('{') > response.count('}'):
+        response = response + '}'
+    
+    return json.loads(response)
 
 class OutreachTool(ABC):
     """Base class for outreach tools."""
@@ -56,7 +115,7 @@ class CompanyResearchTool(OutreachTool):
         )
         
         try:
-            data = json.loads(result.stdout.strip())
+            data = parse_json_response(result.stdout.strip())
             return {'status': 'success', 'data': data}
         except json.JSONDecodeError:
             return {'status': 'error', 'message': result.stdout[:200]}
@@ -98,7 +157,7 @@ class VulnerabilityAssessmentTool(OutreachTool):
         )
         
         try:
-            data = json.loads(result.stdout.strip())
+            data = parse_json_response(result.stdout.strip())
             return {'status': 'success', 'vulnerabilities': data}
         except json.JSONDecodeError:
             return {'status': 'error', 'message': result.stdout[:200]}
@@ -297,7 +356,17 @@ def run_outreach_agent_for_company(company_name: str, domain: str) -> Dict[str, 
     return agent.run()
 
 if __name__ == '__main__':
-    # Example usage
-    result = run_outreach_agent_for_company('Example Corp', 'example.com')
+    import sys
+    
+    # Handle command line arguments
+    if len(sys.argv) < 3:
+        print("Usage: python3 outreach_agent.py <company_name> <domain>")
+        print("Example: python3 outreach_agent.py 'Shopify' 'shopify.com'")
+        sys.exit(1)
+    
+    company_name = sys.argv[1]
+    domain = sys.argv[2]
+    
+    result = run_outreach_agent_for_company(company_name, domain)
     print("\nAgent output:")
     print(json.dumps(result, indent=2))
