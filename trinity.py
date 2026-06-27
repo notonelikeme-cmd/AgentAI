@@ -3,8 +3,6 @@
 import argparse
 import asyncio
 import json
-import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -168,11 +166,10 @@ def cmd_report(args):
     router = ModelRouter()
     writer = ReportWriter(router=router)
 
-    import json as _json
     gate_data = {}
     if getattr(args, "gate_data", None):
         with open(args.gate_data) as f:
-            gate_data = _json.load(f)
+            gate_data = json.load(f)
 
     meta = writer.write(
         hypothesis=args.hypothesis,
@@ -180,7 +177,7 @@ def cmd_report(args):
         pipeline_result={},
         platform=getattr(args, "platform", "Immunefi"),
     )
-    print(json.dumps(meta, indent=2))
+    print(json.dumps(meta, indent=2, default=str))
 
 
 def cmd_router_status(args):
